@@ -5,14 +5,26 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 import numpy as np
+import smtplib
+import random
+import string
 
-# ---------------- CONFIG ----------------
+# ================= CONFIG =================
 st.set_page_config("Business SaaS", layout="wide")
 
-# ---------------- DB ----------------
+# ================= EMAIL CONFIG =================
+EMAIL_SENDER = "simondamilare8@gmail.com"
+EMAIL_PASSWORD = "dayq ehyw cbvf ltfd"  # Gmail App Password
+
+# temporary reset storage (for demo)
+if "reset_code" not in st.session_state:
+    st.session_state.reset_code = None
+if "reset_user" not in st.session_state:
+    st.session_state.reset_user = None
+
+# ================= DB =================
 def get_db():
-    conn = sqlite3.connect("business.db", check_same_thread=False)
-    return conn
+    return sqlite3.connect("business.db", check_same_thread=False)
 
 def load_user_sales(user):
     conn = get_db()
@@ -24,42 +36,79 @@ def load_user_sales(user):
     conn.close()
     return df
 
-# ---------------- SECURITY (FIXED) ----------------
+# ================= SECURITY =================
 def hash_password(password):
-    # store as STRING (safe for SQLite)
-    return bcrypt.hashpw(
-        password.encode("utf-8"),
-        bcrypt.gensalt()
-    ).decode("utf-8")
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def check_password(password, hashed):
-    # convert back to bytes before checking
-    return bcrypt.checkpw(
-        password.encode("utf-8"),
-        hashed.encode("utf-8")
-    )
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
-# ---------------- SESSION ----------------
+# ================= EMAIL FUNCTION =================
+def send_email(receiver, subject, message):
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+
+        msg = f"Subject: {subject}\n\n{message}"
+        server.sendmail(EMAIL_SENDER, receiver, msg)
+        server.quit()
+        return True
+    except:
+        return False
+
+# ================= SESSION =================
 if "user" not in st.session_state:
     st.session_state.user = None
 
 # =====================================================
-# LOGIN / REGISTER
+# AUTH SYSTEM
 # =====================================================
 if st.session_state.user is None:
 
     st.title("🔐 Business SaaS Login")
 
-    mode = st.radio("Choose Option", ["Login", "Register"], key="auth_mode")
-
-    username = st.text_input("Username", key="auth_user")
-    password = st.text_input("Password", type="password", key="auth_pass")
+    mode = st.radio(
+        "Choose Option",
+        ["Login", "Register", "Forgot Password"],
+        key="auth_mode"
+    )
 
     conn = get_db()
     cursor = conn.cursor()
 
-    # ---------------- LOGIN ----------------
-    if mode == "Login":
+    # =================================================
+    # REGISTER
+    # =================================================
+    if mode == "Register":
+
+        username = st.text_input("Username", key="r_user")
+        password = st.text_input("Password", type="password", key="r_pass")
+        email = st.text_input("Email", key="r_email")
+
+        if st.button("Create Account"):
+
+            try:
+                hashed = hash_password(password)
+
+                cursor.execute(
+                    "INSERT INTO users (username, password, email) VALUES (?, ?, ?)",
+                    (username, hashed, email)
+                )
+
+                conn.commit()
+                st.success("Account created successfully")
+
+            except:
+                st.error("User already exists")
+
+    # =================================================
+    # LOGIN
+    # =================================================
+    elif mode == "Login":
+
+        username = st.text_input("Username", key="l_user")
+        password = st.text_input("Password", type="password", key="l_pass")
 
         if st.button("Login"):
 
@@ -77,24 +126,66 @@ if st.session_state.user is None:
             else:
                 st.error("Invalid credentials")
 
-    # ---------------- REGISTER ----------------
-    else:
+    # =================================================
+    # FORGOT PASSWORD (EMAIL RESET)
+    # =================================================
+    elif mode == "Forgot Password":
 
-        if st.button("Create Account"):
+        username = st.text_input("Username", key="f_user")
 
-            try:
-                hashed_password = hash_password(password)
+        if st.button("Send Reset Code"):
 
-                cursor.execute(
-                    "INSERT INTO users (username, password) VALUES (?, ?)",
-                    (username, hashed_password)
+            cursor.execute(
+                "SELECT email FROM users WHERE username=?",
+                (username,)
+            )
+
+            result = cursor.fetchone()
+
+            if result:
+                email = result[0]
+
+                code = "".join(random.choices(string.digits, k=6))
+
+                st.session_state.reset_code = code
+                st.session_state.reset_user = username
+
+                send_email(
+                    email,
+                    "Password Reset Code",
+                    f"Your reset code is: {code}"
                 )
 
-                conn.commit()
-                st.success("Account created successfully")
+                st.success("Reset code sent to your email")
 
-            except:
-                st.error("Username already exists")
+            else:
+                st.error("User not found")
+
+        if st.session_state.reset_code:
+
+            code_input = st.text_input("Enter Reset Code")
+            new_pass = st.text_input("New Password", type="password")
+
+            if st.button("Reset Password"):
+
+                if code_input == st.session_state.reset_code:
+
+                    hashed = hash_password(new_pass)
+
+                    cursor.execute(
+                        "UPDATE users SET password=? WHERE username=?",
+                        (hashed, st.session_state.reset_user)
+                    )
+
+                    conn.commit()
+
+                    st.success("Password updated successfully")
+
+                    st.session_state.reset_code = None
+                    st.session_state.reset_user = None
+
+                else:
+                    st.error("Invalid reset code")
 
     conn.close()
     st.stop()
@@ -110,51 +201,53 @@ if st.sidebar.button("Logout"):
     st.session_state.user = None
     st.rerun()
 
+# 👇 ADD THIS HERE
+if st.sidebar.button("🗑 Clear Data (Soft)"):
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE sales
+        SET status='deleted'
+        WHERE user=?
+    """, (user,))
+
+    conn.commit()
+    conn.close()
+
+    st.success("Moved to Trash")
+    st.rerun()
+
 menu = st.sidebar.radio(
     "Menu",
-    ["Dashboard", "Add Sale", "Analytics", "Trash"]
+    ["Dashboard", "Add Sale", "Analytics", "History", "Trash"]
 )
 
+# 🔥 FIX: LOAD DATA HERE (THIS IS WHAT YOU ARE MISSING)
 df = load_user_sales(user)
-
 # =====================================================
 # DASHBOARD
 # =====================================================
 if menu == "Dashboard":
 
-    st.title("📊 Business Analytics Dashboard")
+    st.title("📊 Dashboard")
 
     if df.empty:
         st.warning("No data yet")
     else:
 
-        total_sales = len(df)
-        total_profit = df["profit"].sum()
-        total_products = df["product"].nunique()
-
         col1, col2, col3 = st.columns(3)
 
-        col1.metric("Sales", total_sales)
-        col2.metric("Profit", f"₦{total_profit:,.2f}")
-        col3.metric("Products", total_products)
-
-        st.subheader("📈 Profit by Product")
+        col1.metric("Sales", len(df))
+        col2.metric("Profit", f"₦{df['profit'].sum():,.2f}")
+        col3.metric("Products", df["product"].nunique())
 
         product_profit = df.groupby("product")["profit"].sum().reset_index()
 
-        st.plotly_chart(
-            px.bar(product_profit, x="product", y="profit"),
-            use_container_width=True
-        )
+        st.plotly_chart(px.bar(product_profit, x="product", y="profit"))
 
-        st.subheader("🥧 Product Share")
-
-        st.plotly_chart(
-            px.pie(product_profit, names="product", values="profit"),
-            use_container_width=True
-        )
-
-        st.dataframe(product_profit)
+        st.plotly_chart(px.pie(product_profit, names="product", values="profit"))
 
 # =====================================================
 # ADD SALE
@@ -163,10 +256,10 @@ elif menu == "Add Sale":
 
     st.title("➕ Add Sale")
 
-    product = st.text_input("Product", key="product_input")
-    quantity = st.number_input("Quantity", min_value=1, key="qty_input")
-    cost = st.number_input("Cost Price", key="cost_input")
-    selling = st.number_input("Selling Price", key="selling_input")
+    product = st.text_input("Product", key="p1")
+    quantity = st.number_input("Quantity", min_value=1)
+    cost = st.number_input("Cost Price")
+    selling = st.number_input("Selling Price")
 
     if st.button("Save Sale"):
 
@@ -184,7 +277,7 @@ elif menu == "Add Sale":
         conn.commit()
         conn.close()
 
-        st.success(f"Saved! Profit: ₦{profit}")
+        st.success("Saved successfully")
 
 # =====================================================
 # ANALYTICS
@@ -193,26 +286,62 @@ elif menu == "Analytics":
 
     st.title("📊 Analytics")
 
-    if df.empty:
-        st.warning("No data")
-    else:
+    if not df.empty:
 
         df["date"] = pd.to_datetime(df["date"])
         monthly = df.groupby(df["date"].dt.to_period("M"))["profit"].sum()
 
         st.line_chart(monthly)
 
-        st.subheader("🤖 Prediction")
-
         x = np.arange(len(monthly))
         y = monthly.values
 
         if len(x) > 1:
             trend = np.polyfit(x, y, 1)
-            prediction = trend[0]*(len(x)+1) + trend[1]
+            st.info(f"Next month prediction: ₦{trend[0]*(len(x)+1)+trend[1]:,.2f}")
+elif menu == "History":
 
-            st.info(f"Next month: ₦{prediction:,.2f}")
+    st.title("📅 Transaction History")
 
+    # convert date column
+    df["date"] = pd.to_datetime(df["date"])
+
+    # ---------------- FILTER OPTIONS ----------------
+    view_type = st.selectbox(
+        "Select View",
+        ["Daily", "Monthly", "Yearly"]
+    )
+
+    if view_type == "Daily":
+
+        selected_date = st.date_input("Pick Date")
+
+        filtered = df[df["date"].dt.date == selected_date]
+
+    elif view_type == "Monthly":
+
+        df["month"] = df["date"].dt.to_period("M")
+        selected_month = st.selectbox("Select Month", df["month"].unique())
+
+        filtered = df[df["date"].dt.to_period("M") == selected_month]
+
+    else:  # Yearly
+
+        df["year"] = df["date"].dt.year
+        selected_year = st.selectbox("Select Year", df["year"].unique())
+
+        filtered = df[df["date"].dt.year == selected_year]
+
+    # ---------------- DISPLAY ----------------
+    st.subheader("Transactions")
+
+    st.dataframe(filtered)
+
+    # ---------------- SUMMARY ----------------
+    st.subheader("Summary")
+
+    st.metric("Total Sales", len(filtered))
+    st.metric("Total Profit", f"₦{filtered['profit'].sum():,.2f}" if not filtered.empty else "₦0")
 # =====================================================
 # TRASH
 # =====================================================
@@ -229,21 +358,3 @@ elif menu == "Trash":
     conn.close()
 
     st.dataframe(trash)
-
-    restore_id = st.number_input("Restore ID", min_value=1)
-
-    if st.button("Restore"):
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-        UPDATE sales
-        SET status='active'
-        WHERE id=? AND user=?
-        """, (restore_id, user))
-
-        conn.commit()
-        conn.close()
-
-        st.success("Restored")
