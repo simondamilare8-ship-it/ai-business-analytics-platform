@@ -9,6 +9,9 @@ import string
 import plotly.express as px
 from datetime import datetime
 
+from prophet import Prophet
+from sklearn.cluster import KMeans
+
 # ================= CONFIG =================
 st.set_page_config(page_title="Business SaaS", layout="wide")
 
@@ -31,7 +34,6 @@ def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
-    # ❗ DO NOT DROP TABLES (this was breaking your login)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,7 +62,7 @@ def init_db():
 
 init_db()
 
-# ================= LOAD SALES =================
+# ================= LOAD DATA =================
 def load_sales(username):
     conn = get_db()
     df = pd.read_sql_query(
@@ -84,7 +86,6 @@ def send_email(to, subject, message):
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-
         msg = f"Subject: {subject}\n\n{message}"
         server.sendmail(EMAIL_SENDER, to, msg)
         server.quit()
@@ -112,7 +113,7 @@ if st.session_state.user is None:
 
         if st.button("Create Account"):
 
-            if not username or not password or not email:
+            if not username or not email or not password:
                 st.warning("Fill all fields")
 
             elif password != confirm:
@@ -139,62 +140,14 @@ if st.session_state.user is None:
 
         if st.button("Login"):
 
-            if not username or not password:
-                st.warning("Enter login details")
+            cursor.execute("SELECT password FROM users WHERE username=?", (username,))
+            result = cursor.fetchone()
+
+            if result and check_password(password, result[0]):
+                st.session_state.user = username
+                st.rerun()
             else:
-                cursor.execute("SELECT password FROM users WHERE username=?", (username,))
-                result = cursor.fetchone()
-
-                if result and check_password(password, result[0]):
-                    st.session_state.user = username
-                    st.rerun()
-                else:
-                    st.error("Invalid credentials")
-
-    # ---------------- RESET PASSWORD ----------------
-    elif mode == "Forgot Password":
-
-        username = st.text_input("Username")
-
-        if st.button("Send Code"):
-
-            cursor.execute("SELECT email FROM users WHERE username=?", (username,))
-            user = cursor.fetchone()
-
-            if user:
-                code = "".join(random.choices(string.digits, k=6))
-                st.session_state.reset_code = code
-                st.session_state.reset_user = username
-
-                send_email(user[0], "Reset Code", f"Your code: {code}")
-                st.success("Reset code sent")
-            else:
-                st.error("User not found")
-
-        if st.session_state.reset_code:
-
-            code_input = st.text_input("Enter Code")
-            new_pass = st.text_input("New Password", type="password")
-
-            if st.button("Reset Password"):
-
-                if code_input == st.session_state.reset_code:
-
-                    hashed = hash_password(new_pass)
-
-                    cursor.execute(
-                        "UPDATE users SET password=? WHERE username=?",
-                        (hashed, st.session_state.reset_user)
-                    )
-
-                    conn.commit()
-
-                    st.success("Password updated")
-                    st.session_state.reset_code = None
-                    st.session_state.reset_user = None
-
-                else:
-                    st.error("Wrong code")
+                st.error("Invalid credentials")
 
     conn.close()
     st.stop()
@@ -202,7 +155,7 @@ if st.session_state.user is None:
 # ================= AFTER LOGIN =================
 user = st.session_state.user
 
-st.sidebar.title(f"Welcome {user}")
+st.sidebar.title(f"👤 Welcome {user}")
 
 if st.sidebar.button("Logout"):
     st.session_state.user = None
@@ -211,10 +164,7 @@ if st.sidebar.button("Logout"):
 if st.sidebar.button("🗑 Clear Data (Soft)"):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE sales SET status='deleted' WHERE username=?",
-        (user,)
-    )
+    cursor.execute("UPDATE sales SET status='deleted' WHERE username=?", (user,))
     conn.commit()
     conn.close()
     st.success("Moved to Trash")
@@ -222,7 +172,7 @@ if st.sidebar.button("🗑 Clear Data (Soft)"):
 
 menu = st.sidebar.radio(
     "Menu",
-    ["Dashboard", "Add Sale", "Analytics", "History", "Trash"]
+    ["Dashboard", "Add Sale", "Analytics", "History", "Trash", "AI Upload"]
 )
 
 df = load_sales(user)
@@ -230,7 +180,7 @@ df = load_sales(user)
 # ================= DASHBOARD =================
 if menu == "Dashboard":
 
-    st.title("Dashboard")
+    st.title("📊 Dashboard")
 
     if df.empty:
         st.warning("No data yet")
@@ -242,7 +192,6 @@ if menu == "Dashboard":
         c3.metric("Products", df["product"].nunique())
 
         summary = df.groupby("product")["profit"].sum().reset_index()
-
         st.plotly_chart(px.bar(summary, x="product", y="profit"), use_container_width=True)
 
 # ================= ADD SALE =================
@@ -285,12 +234,12 @@ elif menu == "Analytics":
 
         st.line_chart(monthly)
 
-        x = np.arange(len(monthly))
-        y = monthly.values
+        if len(monthly) > 1:
+            x = np.arange(len(monthly))
+            y = monthly.values
 
-        if len(x) > 1:
-            trend = np.polyfit(x, y, 1)
-            st.info(f"Next month: ₦{trend[0]*(len(x)+1)+trend[1]:,.2f}")
+            model = np.polyfit(x, y, 1)
+            st.info(f"Next month prediction: ₦{model[0]*(len(x)+1)+model[1]:,.2f}")
 
 # ================= HISTORY =================
 elif menu == "History":
@@ -299,8 +248,8 @@ elif menu == "History":
 
     if df.empty:
         st.warning("No history")
-    else:
 
+    else:
         df["date"] = pd.to_datetime(df["date"])
 
         option = st.selectbox("View", ["Daily", "Monthly", "Yearly"])
@@ -320,6 +269,7 @@ elif menu == "History":
             filtered = df[df["date"].dt.year == y]
 
         st.dataframe(filtered)
+
         st.metric("Total", len(filtered))
         st.metric("Profit", f"₦{filtered['profit'].sum():,.2f}")
 
@@ -341,10 +291,7 @@ elif menu == "Trash":
     if st.button("Restore All"):
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE sales SET status='active' WHERE username=?",
-            (user,)
-        )
+        cursor.execute("UPDATE sales SET status='active' WHERE username=?", (user,))
         conn.commit()
         conn.close()
         st.success("Restored")
@@ -353,11 +300,158 @@ elif menu == "Trash":
     if st.button("Delete Forever"):
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM sales WHERE username=? AND status='deleted'",
-            (user,)
-        )
+        cursor.execute("DELETE FROM sales WHERE username=? AND status='deleted'", (user,))
         conn.commit()
         conn.close()
         st.success("Deleted permanently")
         st.rerun()
+
+# ================= AI BRAIN =================
+elif menu == "AI Upload":
+
+    st.title("🧠 AI Business Brain (Forecast + Insights + Segmentation)")
+
+    file = st.file_uploader("Upload Excel File", type=["xlsx"])
+
+    if file:
+
+        df_ai = pd.read_excel(file)
+        st.subheader("📄 Data Preview")
+        st.dataframe(df_ai)
+
+        required = ["date", "product", "quantity", "cost_price", "selling_price"]
+
+        if not all(col in df_ai.columns for col in required):
+            st.error(f"Missing columns: {required}")
+
+        else:
+            # ================= CLEAN DATA =================
+            df_ai["date"] = pd.to_datetime(df_ai["date"], errors="coerce")
+            df_ai = df_ai.dropna(subset=["date"])
+
+            df_ai["quantity"] = pd.to_numeric(df_ai["quantity"], errors="coerce").fillna(0)
+            df_ai["cost_price"] = pd.to_numeric(df_ai["cost_price"], errors="coerce").fillna(0)
+            df_ai["selling_price"] = pd.to_numeric(df_ai["selling_price"], errors="coerce").fillna(0)
+
+            df_ai["profit"] = (df_ai["selling_price"] - df_ai["cost_price"]) * df_ai["quantity"]
+
+            st.success("Data processed for AI Brain ✅")
+
+            # =====================================================
+            # 📊 1. BUSINESS SUMMARY
+            # =====================================================
+            st.subheader("📊 Business Summary")
+
+            total_profit = df_ai["profit"].sum()
+            total_qty = df_ai["quantity"].sum()
+            product_count = df_ai["product"].nunique()
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Profit", f"₦{total_profit:,.2f}")
+            col2.metric("Total Quantity Sold", total_qty)
+            col3.metric("Products", product_count)
+
+            # =====================================================
+            # 📈 2. FORECASTING (PROPhet SAFE)
+            # =====================================================
+            st.subheader("📈 Profit Forecast")
+
+            from prophet import Prophet
+
+            sales = df_ai.groupby("date")["profit"].sum().reset_index()
+            sales.columns = ["ds", "y"]
+            sales = sales.sort_values("ds")
+
+            if len(sales) < 10:
+                st.warning("Need at least 10 days of data for strong AI forecasting")
+            else:
+                model = Prophet()
+                model.fit(sales)
+
+                future = model.make_future_dataframe(periods=30)
+                forecast = model.predict(future)
+
+                st.line_chart(forecast[["ds", "yhat"]])
+
+                st.success(
+                    f"Next 30 days predicted profit: ₦{forecast['yhat'].tail(30).sum():,.2f}"
+                )
+
+            # =====================================================
+            # 🧾 3. PRODUCT PERFORMANCE ANALYSIS
+            # =====================================================
+            st.subheader("🧾 Product Intelligence")
+
+            product_stats = df_ai.groupby("product").agg({
+                "quantity": "sum",
+                "profit": "sum"
+            }).reset_index()
+
+            best = product_stats.sort_values("profit", ascending=False).head(5)
+            worst = product_stats.sort_values("profit", ascending=True).head(5)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("### 🔥 Top Products")
+                st.dataframe(best)
+
+            with col2:
+                st.markdown("### ⚠️ Low Performing Products")
+                st.dataframe(worst)
+
+            st.bar_chart(product_stats.set_index("product")["profit"])
+
+            # =====================================================
+            # 👥 4. SEGMENTATION (KMEANS)
+            # =====================================================
+            st.subheader("👥 Smart Segmentation")
+
+            from sklearn.cluster import KMeans
+
+            cluster_data = df_ai.groupby("product").agg({
+                "quantity": "sum",
+                "profit": "sum"
+            }).reset_index()
+
+            if len(cluster_data) < 2:
+                st.warning("Not enough data for segmentation")
+            else:
+                k = min(3, len(cluster_data))
+
+                kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
+                cluster_data["segment"] = kmeans.fit_predict(
+                    cluster_data[["quantity", "profit"]]
+                )
+
+                st.dataframe(cluster_data)
+
+                fig = px.scatter(
+                    cluster_data,
+                    x="quantity",
+                    y="profit",
+                    color="segment",
+                    hover_name="product",
+                    title="AI Product Clusters"
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+            # =====================================================
+            # 🧠 5. AI BUSINESS INSIGHTS ENGINE
+            # =====================================================
+            st.subheader("🧠 AI Insights")
+
+            if not product_stats.empty:
+
+                top_product = best.iloc[0]["product"]
+                low_product = worst.iloc[0]["product"]
+
+                st.success(f"💡 Focus more on '{top_product}' — it is your best performer.")
+
+                st.warning(f"⚠️ Review '{low_product}' — it is underperforming.")
+
+                if total_profit < 0:
+                    st.error("Your business is currently making a loss. Review pricing strategy.")
+                elif total_profit > 0:
+                    st.info("Your business is profitable. Keep scaling 📈")
